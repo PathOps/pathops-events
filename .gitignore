@@ -1,0 +1,4 @@
+/pathops-events
+/bin/
+*.test
+*.out
