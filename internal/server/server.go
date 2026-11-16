@@ -323,7 +323,9 @@ func (s *Server) valid(p Published) error {
 		return errors.New("applicationId is not a UUID")
 	case p.ResourceID != "" && !uuid.MatchString(p.ResourceID):
 		return errors.New("resourceId is not a UUID")
-	case p.ResourceID == "" && p.Type != hub.InboxChanged:
+	case p.ResourceID != "" && p.Type == hub.ApplicationChanged:
+		return errors.New("resourceId is not allowed")
+	case p.ResourceID == "" && p.Type != hub.InboxChanged && p.Type != hub.ApplicationChanged:
 		return errors.New("resourceId is required")
 	case p.OccurredAt.IsZero() || p.OccurredAt.After(s.now().Add(5*time.Minute)):
 		return errors.New("occurredAt is missing or in the future")

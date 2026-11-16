@@ -19,10 +19,13 @@ const (
 	BuildChanged    = "BUILD_CHANGED"
 	DeliveryChanged = "DELIVERY_CHANGED"
 	InboxChanged    = "INBOX_CHANGED"
+	// ApplicationChanged: the Application itself (created, its
+	// provisioning); it names no resource.
+	ApplicationChanged = "APPLICATION_CHANGED"
 )
 
 // Types are the event types the hub carries.
-var Types = []string{BuildChanged, DeliveryChanged, InboxChanged}
+var Types = []string{BuildChanged, DeliveryChanged, InboxChanged, ApplicationChanged}
 
 // Event is an invalidation as a browser receives it: its type, the
 // Application and the resource (a Build's, DeliveryRun's or Inbox message's

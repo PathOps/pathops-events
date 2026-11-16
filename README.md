@@ -28,6 +28,7 @@ Invalidations only: what changed, never its new state, logs or a domain DTO.
 | `BUILD_CHANGED` | the Build's id |
 | `DELIVERY_CHANGED` | the DeliveryRun's id |
 | `INBOX_CHANGED` | the Inbox message's id (optional) |
+| `APPLICATION_CHANGED` | none: the Application itself (created, its provisioning) |
 
 A browser receives each as an unnamed SSE event whose data is
 

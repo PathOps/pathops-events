@@ -455,6 +455,13 @@ func TestFanOutFilteredByPerson(t *testing.T) {
 	if l := sb.next(t, "data: ", time.Second); !strings.Contains(l, `"type":"INBOX_CHANGED"`) || strings.Contains(l, "resourceId") {
 		t.Fatalf("bob's event %q", l)
 	}
+	// An Application's own change names no resource.
+	if code, out := e.publish(tcpToken, e.event(hub.ApplicationChanged, appB, "", "bob")); code != http.StatusAccepted || out["delivered"] != float64(1) {
+		t.Fatal(code, out)
+	}
+	if l := sb.next(t, "data: ", time.Second); !strings.Contains(l, `"type":"APPLICATION_CHANGED"`) || !strings.Contains(l, appB) || strings.Contains(l, "resourceId") {
+		t.Fatalf("bob's event %q", l)
+	}
 }
 
 func TestDisconnectCleansUp(t *testing.T) {
@@ -515,12 +522,13 @@ func TestPublishAuthentication(t *testing.T) {
 func TestPublishValidation(t *testing.T) {
 	e := newEnv(t)
 	bad := map[string]func(map[string]any){
-		"unknown type":           func(m map[string]any) { m["type"] = "APPLICATION_DELETED" },
-		"app not a UUID":         func(m map[string]any) { m["applicationId"] = "hello" },
-		"resource not a UUID":    func(m map[string]any) { m["resourceId"] = "../x" },
-		"build without resource": func(m map[string]any) { delete(m, "resourceId") },
-		"future":                 func(m map[string]any) { m["occurredAt"] = time.Now().Add(time.Hour).Format(time.RFC3339) },
-		"no time":                func(m map[string]any) { delete(m, "occurredAt") },
+		"unknown type":              func(m map[string]any) { m["type"] = "APPLICATION_DELETED" },
+		"app not a UUID":            func(m map[string]any) { m["applicationId"] = "hello" },
+		"resource not a UUID":       func(m map[string]any) { m["resourceId"] = "../x" },
+		"build without resource":    func(m map[string]any) { delete(m, "resourceId") },
+		"application with resource": func(m map[string]any) { m["type"] = hub.ApplicationChanged },
+		"future":                    func(m map[string]any) { m["occurredAt"] = time.Now().Add(time.Hour).Format(time.RFC3339) },
+		"no time":                   func(m map[string]any) { delete(m, "occurredAt") },
 		"recipient of another IdP": func(m map[string]any) {
 			m["recipient"] = map[string]string{"issuer": "https://evil", "subject": "alice"}
 		},
