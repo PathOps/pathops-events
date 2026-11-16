@@ -71,9 +71,13 @@ Kubernetes Service only (no route):
 **People.** OpenID Connect Authorization Code with PKCE (S256), `state` and
 `nonce`, as the confidential Dex client `pathops-events-web`, the same model as
 the Artifact Store: the ID token's signature (Dex's JWKS), issuer, audience,
-expiry and nonce are checked; the session is server-side, named by a random
-`__Host-` cookie (`Secure`, `HttpOnly`, `SameSite=Lax`); no token appears in a
-URL or cookie. The PathOps UI is another origin of the same site: its requests
+expiry and nonce are checked; the session is a `__Host-` cookie (`Secure`,
+`HttpOnly`, `SameSite=Lax`, 8 hours) sealed with AES-256-GCM under the
+installer's session key: the identity and its expiry, unreadable and
+unforgeable without the key, so a session outlives a restart of pathops-events
+and a browser's stream reconnects without signing in again. A sign-out clears
+the cookie and revokes it in the running process. No token appears in a URL or
+cookie. The PathOps UI is another origin of the same site: its requests
 carry the cookie, and CORS allows that origin, with credentials, and no other. A
 stream ends at the first heartbeat after its session does.
 
@@ -123,6 +127,7 @@ streams per person, 1024 in all.
 | `PATHOPS_EVENTS_OIDC_CLIENT_ID` | default `pathops-events-web` |
 | `PATHOPS_EVENTS_OIDC_CLIENT_SECRET_FILE` | its secret |
 | `PATHOPS_EVENTS_OIDC_CA_FILE` | the Cell CA (Dex's certificate) |
+| `PATHOPS_EVENTS_SESSION_KEY_FILE` | 64 hex characters: the key that seals session cookies (the installer's) |
 | `PATHOPS_EVENTS_AUDIENCE` | default `pathops-events` |
 | `PATHOPS_EVENTS_PUBLISHER` | `system:serviceaccount:pathops-system:tenant-control-plane` |
 | `PATHOPS_EVENTS_PUBLISHER_ISSUER` | the cluster's ServiceAccount issuer |

@@ -2,8 +2,9 @@
 // (Decision 0063), as the Artifact Store does (Decision 0061): OpenID Connect
 // Authorization Code with PKCE (S256), state and nonce, as the confidential
 // client of pathops-events' public URL. A successful sign-in becomes a
-// server-side session named by a random cookie; no token ever appears in a
-// URL or a cookie.
+// session cookie sealed with the session key (AES-256-GCM: the identity and
+// its expiry, unreadable and unforgeable without the key); no token ever
+// appears in a URL or a cookie.
 //
 //	GET /login                302 to Dex's authorization endpoint
 //	GET /oauth2/callback      code + state: token request, ID token checks,
@@ -11,13 +12,16 @@
 //
 // The ID token is verified with Dex's JWKS (OIDC discovery of the issuer):
 // signature (RS256 or ES256), issuer, audience (the client id), expiry and
-// the nonce of this sign-in. Sessions live in memory: a restart only means
-// the next request goes through Dex again, which an existing Dex session
-// answers without a password.
+// the nonce of this sign-in. A session outlives a restart of pathops-events
+// (the key is the installer's, not the process's), so a browser's live
+// stream reconnects without signing in again. A sign-out revokes the cookie
+// in this process until it expires (and the browser drops it).
 package human
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -68,6 +72,7 @@ type Config struct {
 	ClientID     string
 	ClientSecret string
 	PublicURL    string // https://events-<cell>.<domain>, no path
+	SessionKey   []byte // 32 bytes: seals the session cookies
 	HTTP         *http.Client
 	Now          func() time.Time
 }
@@ -76,12 +81,13 @@ type Config struct {
 type Auth struct {
 	c Config
 
-	mu       sync.Mutex
-	pending  map[string]pending // by state
-	sessions map[string]session // by sha256(cookie value)
-	disc     *discovery
-	keys     jose.JSONWebKeySet
-	fetched  time.Time
+	aead    cipher.AEAD
+	mu      sync.Mutex
+	pending map[string]pending   // by state
+	revoked map[string]time.Time // signed-out cookies (sha256) until they expire
+	disc    *discovery
+	keys    jose.JSONWebKeySet
+	fetched time.Time
 }
 
 type pending struct {
@@ -89,10 +95,17 @@ type pending struct {
 	expires                            time.Time
 }
 
+// session is a sealed cookie's content.
 type session struct {
-	id      Identity
-	expires time.Time
+	Issuer  string `json:"iss"`
+	Subject string `json:"sub"`
+	Email   string `json:"email"`
+	Expires int64  `json:"exp"`
 }
+
+// sealed is the additional data of a session cookie's seal: a value sealed
+// for anything else never opens as one.
+var sealed = []byte("pathops-events session v1")
 
 type discovery struct {
 	Issuer                string `json:"issuer"`
@@ -117,23 +130,53 @@ func New(c Config) (*Auth, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
-	return &Auth{c: c, pending: map[string]pending{}, sessions: map[string]session{}}, nil
+	if len(c.SessionKey) != 32 {
+		return nil, errors.New("the session key must be 32 bytes")
+	}
+	block, err := aes.NewCipher(c.SessionKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return &Auth{c: c, aead: aead, pending: map[string]pending{}, revoked: map[string]time.Time{}}, nil
 }
 
 // Session returns the identity of r's session cookie, if any.
 func (a *Auth) Session(r *http.Request) (Identity, bool) {
 	ck, err := r.Cookie(SessionCookie)
-	if err != nil || ck.Value == "" {
+	if err != nil || ck.Value == "" || len(ck.Value) > 4096 {
+		return Identity{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(ck.Value)
+	n := a.aead.NonceSize()
+	if err != nil || len(raw) <= n {
+		return Identity{}, false
+	}
+	plain, err := a.aead.Open(nil, raw[:n], raw[n:], sealed)
+	var s session
+	if err != nil || json.Unmarshal(plain, &s) != nil || s.Subject == "" || !a.c.Now().Before(time.Unix(s.Expires, 0)) {
 		return Identity{}, false
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	s, ok := a.sessions[digest(ck.Value)]
-	if !ok || a.c.Now().After(s.expires) {
-		delete(a.sessions, digest(ck.Value))
+	_, out := a.revoked[digest(ck.Value)]
+	a.mu.Unlock()
+	if out {
 		return Identity{}, false
 	}
-	return s.id, true
+	return Identity{Issuer: s.Issuer, Subject: s.Subject, Email: s.Email}, true
+}
+
+// seal is the cookie value of a session of id until expires.
+func (a *Auth) seal(id Identity, expires time.Time) string {
+	plain, _ := json.Marshal(session{Issuer: id.Issuer, Subject: id.Subject, Email: id.Email, Expires: expires.Unix()})
+	nonce := make([]byte, a.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		panic(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(a.aead.Seal(nonce, nonce, plain, sealed))
 }
 
 // Login redirects the browser to Dex to sign in, returning to returnTo (a URL
@@ -206,10 +249,7 @@ func (a *Auth) Callback(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		return "", err
 	}
-	value := random()
-	a.mu.Lock()
-	a.sessions[digest(value)] = session{id: id, expires: a.c.Now().Add(SessionLifetime)}
-	a.mu.Unlock()
+	value := a.seal(id, a.c.Now().Add(SessionLifetime))
 	http.SetCookie(w, &http.Cookie{Name: SessionCookie, Value: value, Path: "/", Secure: true, HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, MaxAge: int(SessionLifetime / time.Second)})
 	return p.returnTo, nil
@@ -219,7 +259,8 @@ func (a *Auth) Callback(ctx context.Context, w http.ResponseWriter, r *http.Requ
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if ck, err := r.Cookie(SessionCookie); err == nil && ck.Value != "" {
 		a.mu.Lock()
-		delete(a.sessions, digest(ck.Value))
+		a.expire()
+		a.revoked[digest(ck.Value)] = a.c.Now().Add(SessionLifetime)
 		a.mu.Unlock()
 	}
 	http.SetCookie(w, &http.Cookie{Name: SessionCookie, Value: "", Path: "/", Secure: true, HttpOnly: true,
@@ -372,7 +413,7 @@ func (a *Auth) get(ctx context.Context, u string, v any) error {
 	return nil
 }
 
-// expire drops expired pending sign-ins and sessions (a.mu held).
+// expire drops expired pending sign-ins and revocations (a.mu held).
 func (a *Auth) expire() {
 	now := a.c.Now()
 	for k, p := range a.pending {
@@ -380,9 +421,9 @@ func (a *Auth) expire() {
 			delete(a.pending, k)
 		}
 	}
-	for k, s := range a.sessions {
-		if now.After(s.expires) {
-			delete(a.sessions, k)
+	for k, until := range a.revoked {
+		if now.After(until) {
+			delete(a.revoked, k)
 		}
 	}
 }

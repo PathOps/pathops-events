@@ -30,6 +30,9 @@ type Config struct {
 	OIDCClientID   string // PATHOPS_EVENTS_OIDC_CLIENT_ID, default pathops-events-web
 	OIDCSecretFile string // PATHOPS_EVENTS_OIDC_CLIENT_SECRET_FILE
 	OIDCCAFile     string // PATHOPS_EVENTS_OIDC_CA_FILE: optional roots for Dex (the Cell CA)
+	// SessionKeyFile holds the key that seals session cookies: 64 hex
+	// characters (32 bytes), the installer's, so sessions outlive a restart.
+	SessionKeyFile string // PATHOPS_EVENTS_SESSION_KEY_FILE
 
 	// Publishers: Kubernetes ServiceAccount tokens, reviewed by the API
 	// server (TokenReview with Audience), of exactly Publisher.
@@ -61,6 +64,7 @@ func Load(getenv func(string) string) (Config, error) {
 		OIDCClientID:        or(getenv("PATHOPS_EVENTS_OIDC_CLIENT_ID"), "pathops-events-web"),
 		OIDCSecretFile:      getenv("PATHOPS_EVENTS_OIDC_CLIENT_SECRET_FILE"),
 		OIDCCAFile:          getenv("PATHOPS_EVENTS_OIDC_CA_FILE"),
+		SessionKeyFile:      getenv("PATHOPS_EVENTS_SESSION_KEY_FILE"),
 		Audience:            or(getenv("PATHOPS_EVENTS_AUDIENCE"), "pathops-events"),
 		Publisher:           getenv("PATHOPS_EVENTS_PUBLISHER"),
 		TokenIss:            getenv("PATHOPS_EVENTS_PUBLISHER_ISSUER"),
@@ -85,6 +89,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if c.OIDCSecretFile == "" {
 		errs = append(errs, errors.New("PATHOPS_EVENTS_OIDC_CLIENT_SECRET_FILE is required"))
+	}
+	if c.SessionKeyFile == "" {
+		errs = append(errs, errors.New("PATHOPS_EVENTS_SESSION_KEY_FILE is required"))
 	}
 	if !serviceAccount.MatchString(c.Publisher) {
 		errs = append(errs, errors.New("PATHOPS_EVENTS_PUBLISHER must be system:serviceaccount:<namespace>:<name>"))

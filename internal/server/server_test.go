@@ -37,6 +37,8 @@ const (
 	tcpToken = "tcp-token"
 )
 
+var sessionKey = []byte("0123456789abcdef0123456789abcdef")
+
 // dex is a fake Dex: discovery, JWKS, and an authorization code flow whose
 // codes the test mints (code -> the ID token claims it redeems to).
 type dex struct {
@@ -125,7 +127,7 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(e.int.Close)
 	e.s.PublicURL = e.pub.URL
 	people, err := human.New(human.Config{Issuer: d.srv.URL, ClientID: clientID, ClientSecret: secret, PublicURL: e.pub.URL,
-		HTTP: d.srv.Client()})
+		SessionKey: sessionKey, HTTP: d.srv.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}

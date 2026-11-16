@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"log/slog"
@@ -49,6 +50,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	key, err := os.ReadFile(cfg.SessionKeyFile)
+	if err != nil {
+		return err
+	}
+	sessionKey, err := hex.DecodeString(strings.TrimSpace(string(key)))
+	if err != nil || len(sessionKey) != 32 {
+		return errors.New("PATHOPS_EVENTS_SESSION_KEY_FILE must hold 64 hex characters")
+	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	if cfg.OIDCCAFile != "" {
@@ -66,7 +75,7 @@ func run(log *slog.Logger) error {
 		tr.TLSClientConfig.RootCAs = roots
 	}
 	people, err := human.New(human.Config{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID,
-		ClientSecret: strings.TrimSpace(string(secret)), PublicURL: cfg.PublicURL,
+		ClientSecret: strings.TrimSpace(string(secret)), PublicURL: cfg.PublicURL, SessionKey: sessionKey,
 		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: tr}})
 	if err != nil {
 		return err
