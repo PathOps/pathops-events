@@ -1,4 +1,4 @@
-/pathops-events
-/bin/
-*.test
-*.out
+node_modules/
+dist/
+.npm-cache/
+coverage/
