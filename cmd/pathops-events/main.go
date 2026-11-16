@@ -1,8 +1,9 @@
 // Command pathops-events runs pathops-events (Decision 0063): the Cell's
-// live-update channel. Browsers of signed-in people (the Cell's Dex) hold one
-// Server-Sent Events stream each; the Tenant Control Plane publishes small
-// invalidations on an internal listener with a short-lived ServiceAccount
-// token; each one reaches the streams of the person it names. It keeps no
+// live-update channel. Browsers of signed-in people hold one Socket.IO
+// connection each, authenticated by the PathOps token the UI already holds
+// for the Tenant CP; the Tenant Control Plane publishes small invalidations on
+// an internal listener with a short-lived ServiceAccount token; each one
+// reaches the connections of the person it names. It keeps no
 // domain state: REST stays the source of truth. One replica, in memory. The
 // configuration comes from the environment (internal/config).
 package main
@@ -11,7 +12,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"log/slog"
@@ -19,14 +19,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
+	siolog "github.com/zishang520/socket.io/v3/pkg/log"
+
 	"github.com/PathOps/pathops-events/internal/config"
 	"github.com/PathOps/pathops-events/internal/hub"
-	"github.com/PathOps/pathops-events/internal/human"
 	"github.com/PathOps/pathops-events/internal/server"
+	"github.com/PathOps/pathops-events/internal/token"
 	"github.com/PathOps/pathops-events/internal/workload"
 )
 
@@ -46,40 +47,23 @@ func run(log *slog.Logger) error {
 	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
 	flag.Parse()
 
-	secret, err := os.ReadFile(cfg.OIDCSecretFile)
-	if err != nil {
-		return err
-	}
-	key, err := os.ReadFile(cfg.SessionKeyFile)
-	if err != nil {
-		return err
-	}
-	sessionKey, err := hex.DecodeString(strings.TrimSpace(string(key)))
-	if err != nil || len(sessionKey) != 32 {
-		return errors.New("PATHOPS_EVENTS_SESSION_KEY_FILE must hold 64 hex characters")
-	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	// The Socket.IO library's debug log prints handshakes and events (a
+	// token among them): never on.
+	siolog.DEBUG.Store(false)
+	var roots *x509.CertPool
 	if cfg.OIDCCAFile != "" {
 		ca, err := os.ReadFile(cfg.OIDCCAFile)
 		if err != nil {
 			return err
 		}
-		roots, err := x509.SystemCertPool()
-		if err != nil {
+		if roots, err = x509.SystemCertPool(); err != nil {
 			roots = x509.NewCertPool()
 		}
 		if !roots.AppendCertsFromPEM(ca) {
 			return errors.New("PATHOPS_EVENTS_OIDC_CA_FILE holds no certificate")
 		}
-		tr.TLSClientConfig.RootCAs = roots
 	}
-	people, err := human.New(human.Config{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCClientID,
-		ClientSecret: strings.TrimSpace(string(secret)), PublicURL: cfg.PublicURL, SessionKey: sessionKey,
-		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: tr}})
-	if err != nil {
-		return err
-	}
+	people := token.NewVerifier(cfg.OIDCIssuer, cfg.TokenAudience, roots)
 	kube, err := workload.NewClient(cfg.KubernetesCAFile)
 	if err != nil {
 		return err
@@ -92,19 +76,17 @@ func run(log *slog.Logger) error {
 	s := &server.Server{Hub: h, People: people,
 		Publishers: &workload.Verifier{APIServer: cfg.KubernetesURL, Client: kube, TokenFile: cfg.KubernetesTokenFile,
 			Audience: cfg.Audience, Publisher: cfg.Publisher, Issuer: cfg.TokenIss, MaxTTL: cfg.MaxTTL},
-		PublicURL: cfg.PublicURL, AllowedOrigin: cfg.AllowedOrigin, Issuer: cfg.OIDCIssuer,
-		Heartbeat: cfg.Heartbeat, Retry: 5 * time.Second, Log: log}
+		AllowedOrigin: cfg.AllowedOrigin, Issuer: cfg.OIDCIssuer, Log: log}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Info("configuration", "publicUrl", cfg.PublicURL, "allowedOrigin", cfg.AllowedOrigin, "oidcIssuer", cfg.OIDCIssuer,
-		"oidcClientId", cfg.OIDCClientID, "audience", cfg.Audience, "publisher", cfg.Publisher, "publisherIssuer", cfg.TokenIss,
-		"publisherMaxTtl", cfg.MaxTTL.String(), "heartbeat", cfg.Heartbeat.String(),
-		"public", cfg.PublicAddress, "internal", cfg.InternalAddress)
+	log.Info("configuration", "allowedOrigin", cfg.AllowedOrigin, "oidcIssuer", cfg.OIDCIssuer,
+		"tokenAudience", cfg.TokenAudience, "audience", cfg.Audience, "publisher", cfg.Publisher, "publisherIssuer", cfg.TokenIss,
+		"publisherMaxTtl", cfg.MaxTTL.String(), "public", cfg.PublicAddress, "internal", cfg.InternalAddress)
 
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
-	// No write timeout on either: a stream lasts as long as its browser
-	// (each write has its own deadline), and a publish is small.
+	// No write timeout on either: a browser connection lasts as long as its
+	// token (Socket.IO's ping/pong finds dead ones), and a publish is small.
 	servers := []*http.Server{
 		{Addr: cfg.PublicAddress, Handler: s.Public(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, TLSConfig: tlsConfig},
 		{Addr: cfg.InternalAddress, Handler: s.Internal(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
@@ -124,8 +106,8 @@ func run(log *slog.Logger) error {
 		return err
 	case <-ctx.Done():
 	}
-	// Streams end first (browsers reconnect to the next replica start).
-	log.Info("shutting down", "timeout", shutdownTimeout.String(), "streams", h.Len())
+	// Connections end first (browsers reconnect to the next replica start).
+	log.Info("shutting down", "timeout", shutdownTimeout.String(), "connections", h.Len())
 	h.Close()
 	sctx, cancel := context.WithTimeout(context.Background(), *shutdownTimeout)
 	defer cancel()

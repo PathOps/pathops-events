@@ -23,16 +23,12 @@ type Config struct {
 	TLSCertFile     string // TLS_CERT_FILE
 	TLSKeyFile      string // TLS_KEY_FILE
 
-	// People (Dex OIDC).
-	PublicURL      string // PATHOPS_EVENTS_PUBLIC_URL: https://events-<cell>.<domain>
-	AllowedOrigin  string // PATHOPS_EVENTS_ALLOWED_ORIGIN: the PathOps UI, https://<controlPlane host>
-	OIDCIssuer     string // PATHOPS_EVENTS_OIDC_ISSUER: the Cell's Dex
-	OIDCClientID   string // PATHOPS_EVENTS_OIDC_CLIENT_ID, default pathops-events-web
-	OIDCSecretFile string // PATHOPS_EVENTS_OIDC_CLIENT_SECRET_FILE
-	OIDCCAFile     string // PATHOPS_EVENTS_OIDC_CA_FILE: optional roots for Dex (the Cell CA)
-	// SessionKeyFile holds the key that seals session cookies: 64 hex
-	// characters (32 bytes), the installer's, so sessions outlive a restart.
-	SessionKeyFile string // PATHOPS_EVENTS_SESSION_KEY_FILE
+	// People: the PathOps human token (the access token the PathOps UI holds
+	// for the Tenant CP), from the Cell's Dex, for the PathOps UI's client.
+	AllowedOrigin string // PATHOPS_EVENTS_ALLOWED_ORIGIN: the PathOps UI, https://<controlPlane host>
+	OIDCIssuer    string // PATHOPS_EVENTS_OIDC_ISSUER: the Cell's Dex
+	OIDCCAFile    string // PATHOPS_EVENTS_OIDC_CA_FILE: optional roots for Dex (the Cell CA)
+	TokenAudience string // PATHOPS_EVENTS_TOKEN_AUDIENCE, default pathops-ui (the PathOps UI's client)
 
 	// Publishers: Kubernetes ServiceAccount tokens, reviewed by the API
 	// server (TokenReview with Audience), of exactly Publisher.
@@ -45,8 +41,6 @@ type Config struct {
 	KubernetesURL       string // from KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT
 	KubernetesCAFile    string // PATHOPS_EVENTS_KUBERNETES_CA_FILE
 	KubernetesTokenFile string // PATHOPS_EVENTS_KUBERNETES_TOKEN_FILE
-
-	Heartbeat time.Duration // PATHOPS_EVENTS_HEARTBEAT, default 25s
 }
 
 var serviceAccount = regexp.MustCompile(`^system:serviceaccount:[a-z0-9]([-a-z0-9]*[a-z0-9])?:[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
@@ -58,13 +52,10 @@ func Load(getenv func(string) string) (Config, error) {
 		InternalAddress:     or(getenv("PATHOPS_EVENTS_INTERNAL_ADDRESS"), ":9443"),
 		TLSCertFile:         getenv("TLS_CERT_FILE"),
 		TLSKeyFile:          getenv("TLS_KEY_FILE"),
-		PublicURL:           strings.TrimSuffix(getenv("PATHOPS_EVENTS_PUBLIC_URL"), "/"),
 		AllowedOrigin:       getenv("PATHOPS_EVENTS_ALLOWED_ORIGIN"),
 		OIDCIssuer:          getenv("PATHOPS_EVENTS_OIDC_ISSUER"),
-		OIDCClientID:        or(getenv("PATHOPS_EVENTS_OIDC_CLIENT_ID"), "pathops-events-web"),
-		OIDCSecretFile:      getenv("PATHOPS_EVENTS_OIDC_CLIENT_SECRET_FILE"),
 		OIDCCAFile:          getenv("PATHOPS_EVENTS_OIDC_CA_FILE"),
-		SessionKeyFile:      getenv("PATHOPS_EVENTS_SESSION_KEY_FILE"),
+		TokenAudience:       or(getenv("PATHOPS_EVENTS_TOKEN_AUDIENCE"), "pathops-ui"),
 		Audience:            or(getenv("PATHOPS_EVENTS_AUDIENCE"), "pathops-events"),
 		Publisher:           getenv("PATHOPS_EVENTS_PUBLISHER"),
 		TokenIss:            getenv("PATHOPS_EVENTS_PUBLISHER_ISSUER"),
@@ -78,20 +69,11 @@ func Load(getenv func(string) string) (Config, error) {
 	if c.PublicAddress == c.InternalAddress {
 		errs = append(errs, errors.New("PATHOPS_EVENTS_PUBLIC_ADDRESS and PATHOPS_EVENTS_INTERNAL_ADDRESS must differ"))
 	}
-	if !origin(c.PublicURL) {
-		errs = append(errs, errors.New("PATHOPS_EVENTS_PUBLIC_URL must be https://<host>"))
-	}
 	if !origin(c.AllowedOrigin) {
 		errs = append(errs, errors.New("PATHOPS_EVENTS_ALLOWED_ORIGIN must be https://<host> (the PathOps UI)"))
 	}
 	if !httpsURL(c.OIDCIssuer) {
 		errs = append(errs, errors.New("PATHOPS_EVENTS_OIDC_ISSUER must be an https URL"))
-	}
-	if c.OIDCSecretFile == "" {
-		errs = append(errs, errors.New("PATHOPS_EVENTS_OIDC_CLIENT_SECRET_FILE is required"))
-	}
-	if c.SessionKeyFile == "" {
-		errs = append(errs, errors.New("PATHOPS_EVENTS_SESSION_KEY_FILE is required"))
 	}
 	if !serviceAccount.MatchString(c.Publisher) {
 		errs = append(errs, errors.New("PATHOPS_EVENTS_PUBLISHER must be system:serviceaccount:<namespace>:<name>"))
@@ -99,8 +81,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if !httpsURL(c.TokenIss) {
 		errs = append(errs, errors.New("PATHOPS_EVENTS_PUBLISHER_ISSUER must be an https URL (the cluster's ServiceAccount issuer)"))
 	}
-	if c.Audience == c.OIDCClientID {
-		errs = append(errs, errors.New("PATHOPS_EVENTS_AUDIENCE must not be the OIDC client id"))
+	// A person's token is never a publisher's, nor the reverse.
+	if c.Audience == c.TokenAudience {
+		errs = append(errs, errors.New("PATHOPS_EVENTS_AUDIENCE must differ from PATHOPS_EVENTS_TOKEN_AUDIENCE"))
 	}
 	if host, port := getenv("KUBERNETES_SERVICE_HOST"), getenv("KUBERNETES_SERVICE_PORT"); host != "" && port != "" {
 		if strings.Contains(host, ":") {
@@ -116,11 +99,6 @@ func Load(getenv func(string) string) (Config, error) {
 	var err error
 	if c.MaxTTL, err = durationOr(getenv("PATHOPS_EVENTS_PUBLISHER_MAX_TTL"), time.Hour); err != nil {
 		errs = append(errs, err)
-	}
-	if c.Heartbeat, err = durationOr(getenv("PATHOPS_EVENTS_HEARTBEAT"), 25*time.Second); err != nil {
-		errs = append(errs, err)
-	} else if c.Heartbeat < time.Second || c.Heartbeat > time.Minute {
-		errs = append(errs, errors.New("PATHOPS_EVENTS_HEARTBEAT must be 1s to 1m"))
 	}
 	return c, errors.Join(errs...)
 }

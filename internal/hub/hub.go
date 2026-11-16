@@ -1,7 +1,7 @@
 // Package hub fans invalidations out to the browsers connected in this
 // process (Decision 0063, v1: one replica, in memory, no broker, no replay).
 //
-// A subscriber is one SSE connection of a signed-in person; an invalidation
+// A subscriber is one Socket.IO connection of a person; an invalidation
 // names the person who may read what changed (the Application's owner, as
 // the Tenant CP decided) and reaches only that person's subscribers. Nothing
 // is kept: an invalidation with no subscriber is gone, and a browser that
@@ -47,7 +47,7 @@ const (
 	DefaultMaxSubscribers = 1024
 	DefaultMaxPerPerson   = 16
 	// Buffer is how many invalidations wait for a slow browser; one more
-	// ends its stream (it reconnects and reads REST again).
+	// ends its connection (it reconnects and reads REST again).
 	Buffer = 64
 )
 
